@@ -1,0 +1,280 @@
+= Отчет по лабораторной работе RTOS
+
+== Задание:
+
+Реализовать моргание светодиодов по удержанию нажатию кнопки,
+используя операционную систему реального времени.
+
+== Выполнение работы:
+
+Особенностью операционных систем реального времени является наличие
+межзадачной коммуникации.
+То есть задачи, которые требуется решить связаны между собой и могут реагировать друг на
+друга с учетом поставленного приоритета.
+Например, нашу задачу можно описать так: произошло событие -  нажатие кнопки.
+Задача определения нажатия кнопок должна как-то оповестить другие задачи, которые
+реагируют(в нашем случае это загорание светодиодов) на нажатие кнопок, что
+произошло событие "Нажатие кнопки".
+Если событие не произошло и задача ожидает его наступления,
+то она не находится в состоянии готовности к выполнению, а
+следовательно, не может быть выполнена планировщиком. Задача находится
+в состоянии ожидание.
+Как только событие произошло – задача ожидающая это событие переходит
+в состояние готовности и планировщик в зависимости от приоритета запускает
+её на исполнение.
+Данные действия реализованы в коде с помощью создания отдельных классов.
+
+
+== Код программы:
+
+_Ledtask.h_
+
+[, cpp]
+
+----
+#pragma once
+#include "thread.hpp"
+#include "Iled.h"
+#include "chrono"
+#include "event.hpp"
+
+using namespace OsWrapper;
+
+class LedTask : public Thread<128U>
+{
+  public:
+  LedTask( ILed& iLed, Event& ievent) : led(iLed), event(ievent)
+   {
+    }
+  void Execute() override;
+  private:
+  ILed& led;
+  Event& event;
+};
+----
+
+
+_Ledtask.cpp_
+[, cpp]
+
+----
+#include "Ledtask.h"
+
+void LedTask::Execute()
+{
+  for(;;)
+   {
+     if (event.Wait() != 0)
+      {
+        led.Toggle();
+      }
+   }
+}
+----
+
+_Button.h_
+
+[, cpp]
+
+----
+#pragma once
+#include "IButton.h"
+
+
+template <typename TPORT, int pinNum>
+class Button : public IButton
+{
+  public:
+  bool IsPressed() override
+   {
+     return !(TPORT::IDR::Get() & (1 << pinNum));
+   }
+} ;
+----
+
+_ButtonTask.cpp_
+
+[, cpp]
+
+----
+#include "ButtonTask.h"
+
+void ButtonTask::Execute()
+ {
+   for(;;)
+    {
+      if (button.IsPressed())
+       {
+         event.Signal();
+       }
+      Sleep(300ms);
+    }
+ }
+----
+
+_ButtonTask.h_
+
+[, cpp]
+
+----
+#pragma once
+#include "thread.hpp"
+#include "IButton.h"
+#include "event.hpp"
+
+
+using namespace OsWrapper;
+
+class ButtonTask : public Thread<128U>
+{
+  public:
+  ButtonTask( IButton& iButton, Event& ievent) : button(iButton), event(ievent)
+   {
+   }
+  void Execute() override;
+  private:
+  IButton& button;
+  Event& event;
+};
+----
+
+_IButton.h_
+
+[, cpp]
+
+----
+#pragma once
+class IButton
+{
+  public:
+  virtual bool IsPressed() = 0;
+};
+----
+
+_Iled.h_
+
+[, cpp]
+
+----
+#pragma once
+class ILed
+{
+  public:
+  virtual void Toggle() = 0;
+};
+----
+
+_Led.h_
+
+[, cpp]
+
+----
+#pragma once
+#include "Iled.h"
+template <typename TPORT, int pinNum>
+class Led : public ILed
+{
+  public:
+  void Toggle() override
+    {
+      TPORT::ODR::Toggle(1 << pinNum) ;
+    }
+} ;
+----
+
+_main.cpp_
+
+[, cpp]
+
+----
+#include "rtos.hpp" // for Rtos
+#include "rccregisters.hpp" // for RCC
+#include "Led.h"
+#include "Ledtask.h"
+#include "Button.h"
+#include "ButtonTask.h"
+#include <gpioaregisters.hpp> // for GPIOA
+#include <gpiocregisters.hpp> // for GPIOC
+#include "event.hpp"
+
+std::uint32_t SystemCoreClock = 16'000'000U;
+
+
+extern "C" {
+int __low_level_init(void)
+ {
+   RCC::CR::HSION::On::Set();
+   while (RCC::CR::HSIRDY::NotReady::IsSet())
+    {
+    }
+//Switch system clock on external oscillator
+   RCC::CFGR::SW::Hsi::Set();
+   while (!RCC::CFGR::SWS::Hsi::IsSet())
+    {
+    }
+//Switch on clock on PortA and PortC
+   RCC::AHB1ENRPack<
+    RCC::AHB1ENR::GPIOCEN::Enable,
+    RCC::AHB1ENR::GPIOAEN::Enable
+   >::Set();
+
+   RCC::APB2ENR::SYSCFGEN::Enable::Set();
+
+//LED1 on PortA.5, set PortA.5 as output
+   GPIOA::MODER::MODER5::Output::Set();
+
+/* LED2 on PortC.9, LED3 on PortC.8, LED4 on PortC.5 so set PortC.5,8,9 as output */
+   GPIOC::MODERPack<
+     GPIOC::MODER::MODER5::Output,
+     GPIOC::MODER::MODER8::Output,
+     GPIOC::MODER::MODER9::Output,
+     GPIOC::MODER::MODER13::Input,
+   >::Set();
+
+   return 1;
+  }
+}
+
+
+Led<GPIOC, 5> led1;
+Led<GPIOC, 8> led2;
+Led<GPIOC, 9> led3;
+Led<GPIOA, 5> led4;
+Button <GPIOC, 13> button;
+
+Event event(1000ms, 1);
+
+
+LedTask led1Task(led1, event);
+LedTask led2Task(led2, event);
+LedTask led3Task(led3, event);
+LedTask led4Task(led4, event);
+
+ButtonTask buttontask(button, event) ;
+
+using namespace OsWrapper;
+
+int main()
+
+{
+  Rtos::CreateThread(led1Task, "led1Task", ThreadPriority::normal);
+  Rtos::CreateThread(led2Task, "led2Task", ThreadPriority::normal);
+  Rtos::CreateThread(led3Task, "led3Task", ThreadPriority::normal);
+  Rtos::CreateThread(led4Task, "led4Task", ThreadPriority::normal);
+  Rtos::CreateThread(buttontask, "buttontask", ThreadPriority::normal);
+  Rtos::Start();
+  return 0;
+}
+----
+
+
+== Результата выполнения работы:
+
+Работа программы при нажатии кнопки:
+
+image::https://github.com/musenzovakhomenko/rtos/blob/main/1.gif[]
+
+
+Работа программы при удержании кнопки:
+
+image::https://github.com/musenzovakhomenko/rtos/blob/main/2.gif[]
